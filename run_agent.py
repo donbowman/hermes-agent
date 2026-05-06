@@ -3319,9 +3319,97 @@ class AIAgent:
     # ── Per-turn primary restoration ─────────────────────────────────────
 
     def _restore_primary_runtime(self) -> bool:
-        """Forwarder — see ``agent.agent_runtime_helpers.restore_primary_runtime``."""
-        from agent.agent_runtime_helpers import restore_primary_runtime
-        return restore_primary_runtime(self)
+        """Restore the primary runtime at the start of a new turn.
+
+        In long-lived CLI sessions a single AIAgent instance spans multiple
+        turns.  Without restoration, one transient failure pins the session
+        to the fallback provider for every subsequent turn.  Calling this at
+        the top of ``run_conversation()`` makes fallback turn-scoped.
+
+        The gateway caches agents across messages (``_agent_cache`` in
+        ``gateway/run.py``), so this restoration IS needed there too.
+        """
+        if not self._fallback_activated:
+            # Reset the chain index even when no fallback was activated this
+            # turn.  Without this, a turn where _try_activate_fallback() was
+            # called but returned False (chain exhausted or provider not
+            # configured) leaves _fallback_index >= len(_fallback_chain) while
+            # _fallback_activated stays False.  The next turn skips this block
+            # entirely, stranding the index and silently blocking all future
+            # fallback attempts for the session.  Fixes #20465.
+            self._fallback_index = 0
+            return False
+
+        if getattr(self, "_rate_limited_until", 0) > time.monotonic():
+            return False  # primary still in rate-limit cooldown, stay on fallback
+
+        rt = self._primary_runtime
+        try:
+            # ── Core runtime state ──
+            self.model = rt["model"]
+            self.provider = rt["provider"]
+            self.base_url = rt["base_url"]           # setter updates _base_url_lower
+            self.api_mode = rt["api_mode"]
+            if hasattr(self, "_transport_cache"):
+                self._transport_cache.clear()
+            self.api_key = rt["api_key"]
+            self._client_kwargs = dict(rt["client_kwargs"])
+            self._use_prompt_caching = rt["use_prompt_caching"]
+            # Default to native layout when the restored snapshot predates the
+            # native-vs-proxy split (older sessions saved before this PR).
+            self._use_native_cache_layout = rt.get(
+                "use_native_cache_layout",
+                self.api_mode == "anthropic_messages" and self.provider == "anthropic",
+            )
+
+            # ── Rebuild client for the primary provider ──
+            if self.api_mode == "anthropic_messages":
+                from agent.anthropic_adapter import build_anthropic_client
+                self._anthropic_api_key = rt["anthropic_api_key"]
+                self._anthropic_base_url = rt["anthropic_base_url"]
+                self._anthropic_client = build_anthropic_client(
+                    rt["anthropic_api_key"], rt["anthropic_base_url"],
+                    timeout=get_provider_request_timeout(self.provider, self.model),
+                )
+                self._is_anthropic_oauth = rt["is_anthropic_oauth"]
+                self.client = None
+            else:
+                self.client = self._create_openai_client(
+                    dict(rt["client_kwargs"]),
+                    reason="restore_primary",
+                    shared=True,
+                )
+
+            # ── Restore context engine state ──
+            cc = self.context_compressor
+            cc.update_model(
+                model=rt["compressor_model"],
+                context_length=rt["compressor_context_length"],
+                base_url=rt["compressor_base_url"],
+                api_key=rt["compressor_api_key"],
+                provider=rt["compressor_provider"],
+            )
+
+            # ── Reset fallback chain for the new turn ──
+            self._fallback_activated = False
+            self._fallback_index = 0
+
+            logging.info(
+                "Primary runtime restored for new turn: %s (%s)",
+                self.model, self.provider,
+            )
+            return True
+        except Exception as e:
+            logging.warning("Failed to restore primary runtime: %s", e)
+            return False
+
+    # Which error types indicate a transient transport failure worth
+    # one more attempt with a rebuilt client / connection pool.
+    _TRANSIENT_TRANSPORT_ERRORS = frozenset({
+        "ReadTimeout", "ConnectTimeout", "PoolTimeout",
+        "ConnectError", "RemoteProtocolError",
+        "APIConnectionError", "APITimeoutError",
+    })
 
     def _try_recover_primary_transport(
         self, api_error: Exception, *, retry_count: int, max_retries: int,
