@@ -4061,6 +4061,7 @@ class AIAgent:
             "openai/",
             "x-ai/",
             "google/gemini-2",
+            "google/gemma-4",
             "qwen/qwen3",
             "tencent/hy3-preview",
             "xiaomi/",
