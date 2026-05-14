@@ -182,6 +182,42 @@ def _escape_invalid_chars_in_json_strings(raw: str) -> str:
     return "".join(out)
 
 
+def _split_concatenated_tool_call_arguments(raw_args: str) -> list[str] | None:
+    """Split ``{"..."}{"..."}`` tool-call payloads into separate JSON objects.
+
+    Some providers can concatenate multiple complete top-level argument
+    objects without delimiters when emitting parallel tool calls in a single
+    streaming chunk. Only return a split when the entire payload can be
+    losslessly decoded as 2+ complete dict objects; otherwise return None so
+    existing truncation handling stays in control.
+    """
+    if not isinstance(raw_args, str):
+        return None
+
+    raw_stripped = raw_args.strip()
+    if not raw_stripped:
+        return None
+
+    decoder = json.JSONDecoder()
+    pos = 0
+    decoded: list[str] = []
+    while pos < len(raw_stripped):
+        while pos < len(raw_stripped) and raw_stripped[pos].isspace():
+            pos += 1
+        if pos >= len(raw_stripped):
+            break
+        try:
+            parsed, end = decoder.raw_decode(raw_stripped, pos)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        decoded.append(json.dumps(parsed, separators=(",", ":")))
+        pos = end
+
+    return decoded if len(decoded) > 1 else None
+
+
 def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
     """Attempt to repair malformed tool_call argument JSON.
 
@@ -468,6 +504,7 @@ __all__ = [
     "_sanitize_structure_surrogates",
     "_sanitize_messages_surrogates",
     "_escape_invalid_chars_in_json_strings",
+    "_split_concatenated_tool_call_arguments",
     "_repair_tool_call_arguments",
     "_strip_non_ascii",
     "_sanitize_messages_non_ascii",

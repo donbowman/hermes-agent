@@ -32,6 +32,14 @@ from agent.gemini_native_adapter import is_native_gemini_base_url
 from agent.model_metadata import is_local_endpoint
 from agent.message_sanitization import (
     _sanitize_surrogates,
+    _sanitize_messages_surrogates,
+    _sanitize_structure_surrogates,
+    _sanitize_messages_non_ascii,
+    _sanitize_tools_non_ascii,
+    _sanitize_structure_non_ascii,
+    _strip_images_from_messages,
+    _strip_non_ascii,
+    _split_concatenated_tool_call_arguments,
     _repair_tool_call_arguments,
 )
 from tools.terminal_tool import is_persistent_env
@@ -2255,6 +2263,28 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 tc = tool_calls_acc[idx]
                 arguments = tc["function"]["arguments"]
                 tool_name = tc["function"]["name"] or "?"
+
+                split_arguments = _split_concatenated_tool_call_arguments(arguments)
+                if split_arguments:
+                    logger.warning(
+                        "Split concatenated tool_call arguments for %s into %d calls",
+                        tool_name,
+                        len(split_arguments),
+                    )
+                    base_id = tc["id"] or f"call_{idx}"
+                    for split_idx, split_arg in enumerate(split_arguments):
+                        split_id = base_id if split_idx == 0 else f"{base_id}-split-{split_idx + 1}"
+                        mock_tool_calls.append(SimpleNamespace(
+                            id=split_id,
+                            type=tc["type"],
+                            extra_content=tc.get("extra_content"),
+                            function=SimpleNamespace(
+                                name=tc["function"]["name"],
+                                arguments=split_arg,
+                            ),
+                        ))
+                    continue
+
                 if arguments and arguments.strip():
                     try:
                         json.loads(arguments)

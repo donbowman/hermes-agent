@@ -171,6 +171,7 @@ from agent.message_sanitization import (  # noqa: F401
     _sanitize_structure_surrogates,
     _sanitize_messages_surrogates,
     _escape_invalid_chars_in_json_strings,
+    _split_concatenated_tool_call_arguments,
     _repair_tool_call_arguments,
     _strip_non_ascii,
     _sanitize_messages_non_ascii,
@@ -265,6 +266,7 @@ _DB_PERSISTED_MARKER = "_db_persisted"
 # gateway processes leak one OS thread per incoming message and eventually
 # exhaust the system thread limit (RuntimeError: can't start new thread).
 _openrouter_prewarm_done = threading.Event()
+
 
 # =========================================================================
 # Large tool result handler — save oversized output to temp file
