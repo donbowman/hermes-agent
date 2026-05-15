@@ -208,6 +208,7 @@ class TestIsAvailable:
         monkeypatch.setenv("TAVILY_API_KEY", "real")
         assert p.is_available() is True
 
+
     def test_gemini_requires_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _ensure_plugins_loaded()
         from agent.web_search_registry import get_provider
