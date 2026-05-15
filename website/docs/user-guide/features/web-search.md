@@ -358,7 +358,6 @@ By default, the Gemini provider uses `gemini-3.1-flash-lite` for search groundin
 web:
   gemini_model: "gemini-3.1-flash-lite"
 ```
-
 ---
 
 ## Configuration
