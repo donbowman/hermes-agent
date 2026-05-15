@@ -1424,9 +1424,68 @@ class AIAgent:
 
     @staticmethod
     def _extract_api_error_context(error: Exception) -> Dict[str, Any]:
-        """Forwarder — see ``agent.agent_runtime_helpers.extract_api_error_context``."""
-        from agent.agent_runtime_helpers import extract_api_error_context
-        return extract_api_error_context(error)
+        """Extract structured rate-limit details from provider errors."""
+        context: Dict[str, Any] = {}
+
+        body = getattr(error, "body", None)
+        payload = None
+        if isinstance(body, dict):
+            payload = body.get("error") if isinstance(body.get("error"), dict) else body
+        if isinstance(payload, dict):
+            reason = payload.get("code") or payload.get("type") or payload.get("error")
+            if isinstance(reason, str) and reason.strip():
+                context["reason"] = reason.strip()
+            message = payload.get("message") or payload.get("error_description")
+            if isinstance(message, str) and message.strip():
+                context["message"] = message.strip()
+            for key in ("resets_at", "reset_at"):
+                value = payload.get(key)
+                if value not in {None, ""}:
+                    context["reset_at"] = value
+                    break
+            retry_after = payload.get("retry_after")
+            if retry_after not in {None, ""} and "reset_at" not in context:
+                try:
+                    context["reset_at"] = time.time() + float(retry_after)
+                except (TypeError, ValueError):
+                    pass
+
+        response = getattr(error, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers:
+            retry_after = headers.get("retry-after") or headers.get("Retry-After")
+            if retry_after and "reset_at" not in context:
+                try:
+                    context["reset_at"] = time.time() + float(retry_after)
+                except (TypeError, ValueError):
+                    pass
+            ratelimit_reset = headers.get("x-ratelimit-reset")
+            if ratelimit_reset and "reset_at" not in context:
+                context["reset_at"] = ratelimit_reset
+
+        if "message" not in context:
+            raw_message = str(error).strip()
+            if raw_message:
+                context["message"] = raw_message[:500]
+
+        if "reset_at" not in context:
+            message = context.get("message") or ""
+            if isinstance(message, str):
+                delay_match = re.search(r"quotaResetDelay[:\s\"]+(\\d+(?:\\.\\d+)?)(ms|s)", message, re.IGNORECASE)
+                if delay_match:
+                    value = float(delay_match.group(1))
+                    seconds = value / 1000.0 if delay_match.group(2).lower() == "ms" else value
+                    context["reset_at"] = time.time() + seconds
+                else:
+                    sec_match = re.search(
+                        r"retry\s+(?:after\s+)?(\d+(?:\.\d+)?)\s*(?:sec|secs|seconds|s\b)",
+                        message,
+                        re.IGNORECASE,
+                    )
+                    if sec_match:
+                        context["reset_at"] = time.time() + float(sec_match.group(1))
+
+        return context
 
     def _usage_summary_for_api_request_hook(self, response: Any) -> Optional[Dict[str, Any]]:
         """Token buckets for ``post_api_request`` plugins (no raw ``response`` object)."""
@@ -2786,9 +2845,107 @@ class AIAgent:
         classified_reason: Optional[FailoverReason] = None,
         error_context: Optional[Dict[str, Any]] = None,
     ) -> tuple[bool, bool]:
-        """Forwarder — see ``agent.agent_runtime_helpers.recover_with_credential_pool``."""
-        from agent.agent_runtime_helpers import recover_with_credential_pool
-        return recover_with_credential_pool(self, status_code=status_code, has_retried_429=has_retried_429, classified_reason=classified_reason, error_context=error_context)
+        """Attempt credential recovery via pool rotation.
+
+        Returns (recovered, has_retried_429).
+        On rate limits: first occurrence retries same credential (sets flag True).
+                        second consecutive failure rotates to next credential.
+        On billing exhaustion: immediately rotates.
+        On auth failures: attempts token refresh before rotating.
+
+        `classified_reason` lets the recovery path honor the structured error
+        classifier instead of relying only on raw HTTP codes. This matters for
+        providers that surface billing/rate-limit/auth conditions under a
+        different status code, such as Anthropic returning HTTP 400 for
+        "out of extra usage".
+        """
+        pool = self._credential_pool
+        if pool is None:
+            return False, has_retried_429
+
+        effective_reason = classified_reason
+        if effective_reason is None:
+            if status_code == 402:
+                effective_reason = FailoverReason.billing
+            elif status_code == 429:
+                effective_reason = FailoverReason.rate_limit
+            elif status_code in {401, 403}:
+                effective_reason = FailoverReason.auth
+
+        if effective_reason == FailoverReason.billing:
+            rotate_status = status_code if status_code is not None else 402
+            next_entry = pool.mark_exhausted_and_rotate(status_code=rotate_status, error_context=error_context)
+            if next_entry is not None:
+                logger.info(
+                    "Credential %s (billing) — rotated to pool entry %s",
+                    rotate_status,
+                    getattr(next_entry, "id", "?"),
+                )
+                self._swap_credential(next_entry)
+                return True, False
+            return False, has_retried_429
+
+        if effective_reason == FailoverReason.rate_limit:
+            usage_limit_reached = False
+            if error_context:
+                context_reason = str(error_context.get("reason") or "").lower()
+                context_message = str(error_context.get("message") or "").lower()
+                usage_limit_reached = (
+                    "usage_limit_reached" in context_reason
+                    or "usage limit has been reached" in context_message
+                )
+            if not has_retried_429 and not usage_limit_reached:
+                return False, True
+            rotate_status = status_code if status_code is not None else 429
+            next_entry = pool.mark_exhausted_and_rotate(status_code=rotate_status, error_context=error_context)
+            if next_entry is not None:
+                logger.info(
+                    "Credential %s (rate limit) — rotated to pool entry %s",
+                    rotate_status,
+                    getattr(next_entry, "id", "?"),
+                )
+                self._swap_credential(next_entry)
+                return True, False
+            return False, True
+
+        if effective_reason == FailoverReason.auth:
+            # Subscription/entitlement 403s look like auth failures on the
+            # wire but refresh cannot fix them — the OAuth token is
+            # already valid; the account simply lacks the entitlement
+            # (e.g. xAI OAuth without SuperGrok/X Premium for grok-4.3).
+            # Without this guard, ``try_refresh_current()`` keeps minting
+            # fresh tokens against the same unsubscribed account and the
+            # main agent loop spins re-issuing the same 403 until the
+            # user Ctrl+C's.  Surface the error instead so the friendly
+            # entitlement hint from ``_summarize_api_error`` can land.
+            if self._is_entitlement_failure(error_context, status_code):
+                logger.info(
+                    "Credential %s — entitlement-shaped 403 from %s; "
+                    "skipping pool refresh (account lacks subscription, "
+                    "not a transient auth failure).",
+                    status_code if status_code is not None else "auth",
+                    self.provider or "provider",
+                )
+                return False, has_retried_429
+            refreshed = pool.try_refresh_current()
+            if refreshed is not None:
+                logger.info(f"Credential auth failure — refreshed pool entry {getattr(refreshed, 'id', '?')}")
+                self._swap_credential(refreshed)
+                return True, has_retried_429
+            # Refresh failed — rotate to next credential instead of giving up.
+            # The failed entry is already marked exhausted by try_refresh_current().
+            rotate_status = status_code if status_code is not None else 401
+            next_entry = pool.mark_exhausted_and_rotate(status_code=rotate_status, error_context=error_context)
+            if next_entry is not None:
+                logger.info(
+                    "Credential %s (auth refresh failed) — rotated to pool entry %s",
+                    rotate_status,
+                    getattr(next_entry, "id", "?"),
+                )
+                self._swap_credential(next_entry)
+                return True, False
+
+        return False, has_retried_429
 
     def _credential_pool_may_recover_rate_limit(self) -> bool:
         """Whether a rate-limit retry should wait for same-provider credentials."""
