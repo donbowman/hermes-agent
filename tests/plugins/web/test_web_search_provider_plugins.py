@@ -2,7 +2,7 @@
 
 Covers:
 
-- All eight bundled plugins (brave-free, ddgs, searxng, exa, parallel,
+- All nine bundled plugins (brave-free, ddgs, searxng, exa, gemini, parallel,
   tavily, firecrawl, xai) instantiate and self-report the expected
   capabilities + ABC-derived defaults.
 - Each plugin's ``is_available()`` correctly reflects env-var presence.
@@ -37,6 +37,8 @@ def _clear_web_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "TAVILY_API_KEY",
         "TAVILY_BASE_URL",
         "EXA_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
         "PARALLEL_API_KEY",
         "PARALLEL_SEARCH_MODE",
         "FIRECRAWL_API_KEY",
@@ -68,9 +70,9 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestBundledPluginsRegister:
-    """All eight bundled web plugins discover and register correctly."""
+    """All nine bundled web plugins discover and register correctly."""
 
-    def test_all_seven_plugins_present_in_registry(self) -> None:
+    def test_all_nine_plugins_present_in_registry(self) -> None:
         _ensure_plugins_loaded()
         from agent.web_search_registry import list_providers
 
@@ -80,6 +82,7 @@ class TestBundledPluginsRegister:
             "ddgs",
             "exa",
             "firecrawl",
+            "gemini",
             "parallel",
             "searxng",
             "tavily",
@@ -93,6 +96,7 @@ class TestBundledPluginsRegister:
             ("ddgs", True, False),
             ("searxng", True, False),
             ("exa", True, True),
+            ("gemini", True, True),
             ("parallel", True, True),
             ("tavily", True, True),
             ("firecrawl", True, True),
@@ -116,7 +120,17 @@ class TestBundledPluginsRegister:
 
     @pytest.mark.parametrize(
         "plugin_name",
-        ["brave-free", "ddgs", "searxng", "exa", "parallel", "tavily", "firecrawl", "xai"],
+        [
+            "brave-free",
+            "ddgs",
+            "searxng",
+            "exa",
+            "gemini",
+            "parallel",
+            "tavily",
+            "firecrawl",
+            "xai",
+        ],
     )
     def test_each_plugin_has_name_and_display_name(self, plugin_name: str) -> None:
         _ensure_plugins_loaded()
@@ -129,7 +143,17 @@ class TestBundledPluginsRegister:
 
     @pytest.mark.parametrize(
         "plugin_name",
-        ["brave-free", "ddgs", "searxng", "exa", "parallel", "tavily", "firecrawl", "xai"],
+        [
+            "brave-free",
+            "ddgs",
+            "searxng",
+            "exa",
+            "gemini",
+            "parallel",
+            "tavily",
+            "firecrawl",
+            "xai",
+        ],
     )
     def test_each_plugin_has_setup_schema(self, plugin_name: str) -> None:
         """``get_setup_schema()`` returns a dict the picker can consume."""
@@ -181,6 +205,33 @@ class TestIsAvailable:
         assert p.is_available() is False
         monkeypatch.setenv("TAVILY_API_KEY", "real")
         assert p.is_available() is True
+
+    def test_gemini_requires_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _ensure_plugins_loaded()
+        from agent.web_search_registry import get_provider
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        p = get_provider("gemini")
+        assert p is not None
+        assert not p.is_available()
+
+    def test_gemini_available_with_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _ensure_plugins_loaded()
+        from agent.web_search_registry import get_provider
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        p = get_provider("gemini")
+        assert p is not None
+        assert p.is_available()
+
+    def test_gemini_available_with_google_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Gemini is available with GOOGLE_API_KEY."""
+        _ensure_plugins_loaded()
+        from agent.web_search_registry import get_provider
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setenv("GOOGLE_API_KEY", "fake-key")
+        p = get_provider("gemini")
+        assert p is not None
+        assert p.is_available()
 
     def test_exa_requires_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _ensure_plugins_loaded()
@@ -491,6 +542,18 @@ class TestErrorResponseShapes:
         from agent.web_search_registry import get_provider
 
         p = get_provider("xai")
+        assert p is not None
+        result = p.search("test", limit=5)
+        assert isinstance(result, dict)
+        assert result.get("success") is False
+        assert "error" in result
+
+    def test_gemini_search_returns_error_dict_when_unconfigured(self) -> None:
+        """Gemini returns a typed error dict (no GEMINI_API_KEY)."""
+        _ensure_plugins_loaded()
+        from agent.web_search_registry import get_provider
+
+        p = get_provider("gemini")
         assert p is not None
         result = p.search("test", limit=5)
         assert isinstance(result, dict)
