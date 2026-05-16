@@ -25,7 +25,6 @@ from gateway.config import Platform, PlatformConfig, load_gateway_config
 # Platform uses _missing_() for dynamic members, so "google_chat" is
 # resolvable via Platform("google_chat") even without a static
 # GOOGLE_CHAT attribute on the enum class.
-_GC = Platform("google_chat")
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +233,7 @@ def _make_chat_envelope(text="hello", sender_email="u@example.com", sender_type=
 
 class TestPlatformRegistration:
     def test_enum_value(self):
-        assert _GC.value == "google_chat"
+        assert Platform("google_chat").value == "google_chat"
 
     def test_requirements_check_returns_true_when_available(self):
         # The shim flag is True in this test module.
@@ -271,14 +270,14 @@ class TestEnvConfigLoading:
         monkeypatch.setenv("GOOGLE_CHAT_PROJECT_ID", "p")
         # No subscription.
         cfg = load_gateway_config()
-        assert _GC not in cfg.platforms
+        assert Platform("google_chat") not in cfg.platforms
 
     def test_missing_project_does_not_enable(self, monkeypatch):
         self._clean_env(monkeypatch)
         monkeypatch.setenv("GOOGLE_CHAT_SUBSCRIPTION_NAME",
                            "projects/p/subscriptions/s")
         cfg = load_gateway_config()
-        assert _GC not in cfg.platforms
+        assert Platform("google_chat") not in cfg.platforms
 
 
 
@@ -1934,6 +1933,28 @@ class TestPerUserAttachmentRouting:
         assert adapter._user_chat_api is legacy_api
         assert adapter._user_credentials is legacy_creds
 
+    @pytest.mark.asyncio
+    async def test_dispatch_message_passes_user_email_to_setup_files(
+        self, adapter
+    ):
+        """_dispatch_message must pass event.source.user_id (the email)
+        to _handle_setup_files_command, NOT user_id_alt (the resource name)."""
+        envelope = _make_chat_envelope(
+            text="/setup-files",
+            sender_email="don@agilicus.com",
+        )
+        msg = envelope["chat"]["messagePayload"]["message"]
+        
+        adapter._handle_setup_files_command = AsyncMock(return_value=True)
+        await adapter._dispatch_message(msg, envelope["chat"]["messagePayload"])
+        
+        adapter._handle_setup_files_command.assert_called_once_with(
+            chat_id="spaces/S",
+            thread_id=None,
+            raw_text="/setup-files",
+            sender_email="don@agilicus.com"
+        )
+
 
 # ===========================================================================
 # Persistent thread-count store (restart-safe side-thread heuristic)
@@ -2667,7 +2688,7 @@ class TestAuthorizationEmailMatch:
         runner.pairing_store.is_approved = MagicMock(return_value=False)
 
         source = SessionSource(
-            platform=_GC,
+            platform=Platform("google_chat"),
             chat_id="spaces/S",
             chat_type="dm",
             user_id="alice@example.com",       # post-swap: email is canonical
@@ -2688,7 +2709,7 @@ class TestAuthorizationEmailMatch:
         runner.pairing_store.is_approved = MagicMock(return_value=False)
 
         source = SessionSource(
-            platform=_GC,
+            platform=Platform("google_chat"),
             chat_id="spaces/S",
             chat_type="dm",
             user_id="bob@example.com",
@@ -2714,7 +2735,7 @@ class TestAuthorizationEmailMatch:
         runner.pairing_store.is_approved = MagicMock(return_value=False)
 
         source = SessionSource(
-            platform=_GC,
+            platform=Platform("google_chat"),
             chat_id="spaces/S",
             chat_type="dm",
             user_id="users/77777",  # no email available — resource name wins
