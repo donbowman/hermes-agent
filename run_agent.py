@@ -284,6 +284,45 @@ def _qwen_portal_headers() -> dict:
     }
 
 
+class _StreamErrorEvent(Exception):
+    """Synthesized provider error surfaced from a Responses ``error`` SSE frame.
+
+    Some Codex-style Responses backends (xAI for subscription/quota
+    failures, custom relays under malformed-tool-call conditions) emit a
+    standalone ``type=error`` frame instead of routing the failure
+    through ``response.failed`` or returning an HTTP 4xx.  The fallback
+    streaming path raises this exception so ``_summarize_api_error`` and
+    ``_extract_api_error_context`` see a familiar ``.body`` /
+    ``.status_code`` shape and the entitlement detector can match the
+    underlying provider message ("do not have an active Grok
+    subscription", etc.).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: Optional[str] = None,
+        param: Optional[str] = None,
+        status_code: Optional[int] = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.code = code
+        self.param = param
+        self.status_code = status_code
+        # OpenAI SDK-shaped body so _extract_api_error_context /
+        # _summarize_api_error / classify_api_error all pick it up.
+        self.body: Dict[str, Any] = {
+            "error": {
+                "message": message,
+                "code": code,
+                "param": param,
+                "type": "error",
+            }
+        }
+
+
 class AIAgent:
     """
     AI Agent with tool calling capabilities.
@@ -2565,9 +2604,110 @@ class AIAgent:
         return run_codex_stream(self, api_kwargs, client, on_first_delta)
 
     def _run_codex_create_stream_fallback(self, api_kwargs: dict, client: Any = None):
-        """Forwarder — see ``agent.codex_runtime.run_codex_create_stream_fallback``."""
-        from agent.codex_runtime import run_codex_create_stream_fallback
-        return run_codex_create_stream_fallback(self, api_kwargs, client)
+        """Fallback path for stream completion edge cases on Codex-style Responses backends."""
+        active_client = client or self._ensure_primary_openai_client(reason="codex_create_stream_fallback")
+        fallback_kwargs = dict(api_kwargs)
+        fallback_kwargs["stream"] = True
+        fallback_kwargs = self._get_transport().preflight_kwargs(fallback_kwargs, allow_stream=True)
+        stream_or_response = active_client.responses.create(**fallback_kwargs)
+
+        # Compatibility shim for mocks or providers that still return a concrete response.
+        if hasattr(stream_or_response, "output"):
+            return stream_or_response
+        if not hasattr(stream_or_response, "__iter__"):
+            return stream_or_response
+
+        terminal_response = None
+        collected_output_items: list = []
+        collected_text_deltas: list = []
+        try:
+            for event in stream_or_response:
+                self._touch_activity("receiving stream response")
+                event_type = getattr(event, "type", None)
+                if not event_type and isinstance(event, dict):
+                    event_type = event.get("type")
+
+                # ``error`` SSE frames carry the provider's real failure
+                # reason (subscription / quota / model-not-available /
+                # rejected-reasoning-replay) but never appear in the
+                # ``{completed, incomplete, failed}`` terminal set, so the
+                # raw loop below would silently consume them and end with
+                # "did not emit a terminal response".  xAI in particular
+                # emits ``type=error`` as the FIRST frame for OAuth
+                # accounts whose Grok subscription is missing/exhausted —
+                # the SDK's stream helper raises ``RuntimeError(Expected
+                # to have received response.created before error)`` which
+                # the caller catches and routes here, expecting this
+                # fallback to surface the message.  Synthesize an
+                # APIError-shaped exception so ``_summarize_api_error``
+                # and the credential-pool entitlement detector see the
+                # real text instead of a generic RuntimeError.
+                if event_type == "error":
+                    err_message = getattr(event, "message", None)
+                    if not err_message and isinstance(event, dict):
+                        err_message = event.get("message")
+                    err_code = getattr(event, "code", None)
+                    if not err_code and isinstance(event, dict):
+                        err_code = event.get("code")
+                    err_param = getattr(event, "param", None)
+                    if not err_param and isinstance(event, dict):
+                        err_param = event.get("param")
+                    err_message = (err_message or "stream emitted error event").strip()
+                    raise _StreamErrorEvent(err_message, code=err_code, param=err_param)
+
+                # Collect output items and text deltas for backfill
+                if event_type == "response.output_item.done":
+                    done_item = getattr(event, "item", None)
+                    if done_item is None and isinstance(event, dict):
+                        done_item = event.get("item")
+                    if done_item is not None:
+                        collected_output_items.append(done_item)
+                elif event_type in {"response.output_text.delta",}:
+                    delta = getattr(event, "delta", "")
+                    if not delta and isinstance(event, dict):
+                        delta = event.get("delta", "")
+                    if delta:
+                        collected_text_deltas.append(delta)
+
+                if event_type not in {"response.completed", "response.incomplete", "response.failed"}:
+                    continue
+
+                terminal_response = getattr(event, "response", None)
+                if terminal_response is None and isinstance(event, dict):
+                    terminal_response = event.get("response")
+                if terminal_response is not None:
+                    # Backfill empty output from collected stream events
+                    _out = getattr(terminal_response, "output", None)
+                    if isinstance(_out, list) and not _out:
+                        if collected_output_items:
+                            terminal_response.output = list(collected_output_items)
+                            logger.debug(
+                                "Codex fallback stream: backfilled %d output items",
+                                len(collected_output_items),
+                            )
+                        elif collected_text_deltas:
+                            assembled = "".join(collected_text_deltas)
+                            terminal_response.output = [SimpleNamespace(
+                                type="message", role="assistant",
+                                status="completed",
+                                content=[SimpleNamespace(type="output_text", text=assembled)],
+                            )]
+                            logger.debug(
+                                "Codex fallback stream: synthesized from %d deltas (%d chars)",
+                                len(collected_text_deltas), len(assembled),
+                            )
+                    return terminal_response
+        finally:
+            close_fn = getattr(stream_or_response, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+
+        if terminal_response is not None:
+            return terminal_response
+        raise RuntimeError("Responses create(stream=True) fallback did not emit a terminal response.")
 
     def _try_refresh_codex_client_credentials(self, *, force: bool = True) -> bool:
         if self.api_mode != "codex_responses" or self.provider not in {"openai-codex", "xai-oauth"}:
