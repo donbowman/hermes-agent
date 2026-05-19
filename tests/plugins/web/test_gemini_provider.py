@@ -55,7 +55,6 @@ def test_extract_unconfigured(monkeypatch):
     assert "environment variable not set" in results[0]["error"]
 
 
-
 from unittest.mock import MagicMock, patch
 
 def test_search_success(monkeypatch):

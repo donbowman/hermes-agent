@@ -240,25 +240,18 @@ class GeminiWebSearchProvider(WebSearchProvider):
         return {
             "name": "Gemini Google Search Grounding",
             "badge": "free tier available",
-<<<<<<< HEAD
             "tag": "Google Search grounded generation using Gemini API. Supports GEMINI_API_KEY or GOOGLE_API_KEY.",
-=======
-            "tag": "Google Search grounded generation using Gemini API.",
->>>>>>> e01078f76 (feat(web): add gemini search grounding provider to CLI setup wizard)
             "env_vars": [
                 {
                     "key": "GEMINI_API_KEY",
                     "prompt": "Gemini API key",
                     "url": "https://aistudio.google.com/app/apikey",
                 },
-<<<<<<< HEAD
                 {
                     "key": "GOOGLE_API_KEY",
                     "prompt": "Google API key",
                     "url": "https://aistudio.google.com/app/apikey",
                 },
-=======
->>>>>>> e01078f76 (feat(web): add gemini search grounding provider to CLI setup wizard)
             ],
         }
 
