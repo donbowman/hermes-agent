@@ -25,7 +25,7 @@ Both are configured through a single backend selection. Providers are chosen via
 | **Tavily** | `TAVILY_API_KEY` | ✔ | ✔ | 1 000 searches/mo |
 | **Exa** | `EXA_API_KEY` | ✔ | ✔ | 1 000 searches/mo |
 | **Parallel** | `PARALLEL_API_KEY` | ✔ | ✔ | Paid |
-| **Gemini** | `GEMINI_API_KEY` | ✔ | ✔ | ✔ Free tier available |
+| **Gemini** | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | ✔ | ✔ | ✔ Free tier available |
 | **xAI (Grok)** | `XAI_API_KEY` or `hermes auth login xai-oauth` | ✔ | — | Paid (SuperGrok or per-token) |
 
 Brave Search, DDGS, and xAI are **search-only** — pair any of them with Firecrawl/Tavily/Exa/Parallel when you also need `web_extract`. DDGS uses the [`ddgs` Python package](https://pypi.org/project/ddgs/) under the hood; if it isn't already installed, run `pip install ddgs` (or let Hermes lazy-install it on first use). xAI runs Grok's server-side `web_search` tool on the Responses API — results are LLM-generated rather than index-backed, so titles, descriptions, and URL choice are all model output (see the [trust-model caveat](#xai-grok) below).
@@ -345,7 +345,8 @@ Google Search Grounding via the Gemini API. This provides high-quality web searc
 ```bash
 # ~/.hermes/.env
 GEMINI_API_KEY=your-gemini-key-here
-# or GOOGLE_API_KEY
+# or
+# GOOGLE_API_KEY=your-google-key-here
 ```
 
 Get a key at [Google AI Studio](https://aistudio.google.com/app/apikey). Both `GEMINI_API_KEY` and `GOOGLE_API_KEY` are supported.
@@ -483,6 +484,4 @@ This adds a skill that teaches the agent how to:
 - Call the SearXNG JSON API via `curl` or Python
 - Filter by category (`general`, `news`, `science`, etc.)
 - Handle pagination and error cases
-- Fall back gracefully when SearXNG is unreachable
-s
 - Fall back gracefully when SearXNG is unreachable
