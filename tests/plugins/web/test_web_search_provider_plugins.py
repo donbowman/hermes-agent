@@ -70,9 +70,9 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestBundledPluginsRegister:
-    """All nine bundled web plugins discover and register correctly."""
+    """All bundled web plugins discover and register correctly."""
 
-    def test_all_nine_plugins_present_in_registry(self) -> None:
+    def test_all_plugins_present_in_registry(self) -> None:
         _ensure_plugins_loaded()
         from agent.web_search_registry import list_providers
 
