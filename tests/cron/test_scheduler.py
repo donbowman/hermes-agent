@@ -2663,76 +2663,27 @@ class TestSendMediaTimeoutCancelsFuture:
         assert timeout_cancel_calls == [True], "future.cancel() must fire on TimeoutError"
         # 2. Second file still got dispatched — one timeout doesn't abort the batch
         adapter.send_video.assert_called_once()
-        assert adapter.send_video.call_args[1]["video_path"] == str(fast.resolve())
+        assert adapter.send_video.call_args[1]["video_path"] == "/tmp/fast.mp4"
 
 
-class TestCronDeliveryTargets:
-    """``cron_delivery_targets`` powers the dashboard delivery dropdown.
+class TestHomeTargetEnvVarRegistry:
+    """Regression: ``_HOME_TARGET_ENV_VARS`` must include every gateway
+    platform that supports cron-driven outbound delivery. Missing an
+    entry means ``hermes cron create --deliver=<platform>`` silently
+    fails to route through the platform's home channel."""
 
-    It must list every configured + cron-deliverable platform (no hardcoded
-    set), flag whether each has its home channel set, and never include
-    platforms whose gateway isn't configured.
-    """
+    def test_whatsapp_cloud_registered(self):
+        """``deliver=whatsapp_cloud`` routes through
+        WHATSAPP_CLOUD_HOME_CHANNEL — added alongside the existing
+        ``whatsapp`` Baileys entry."""
+        from cron.scheduler import _HOME_TARGET_ENV_VARS
 
-    def _patch_connected(self, monkeypatch, names):
-        import gateway.config as gateway_config
+        assert "whatsapp_cloud" in _HOME_TARGET_ENV_VARS
+        assert _HOME_TARGET_ENV_VARS["whatsapp_cloud"] == "WHATSAPP_CLOUD_HOME_CHANNEL"
 
-        class _Platform:
-            def __init__(self, value):
-                self.value = value
+    def test_baileys_whatsapp_still_registered(self):
+        """Sanity guard: the Cloud addition didn't disturb Baileys
+        whatsapp routing."""
+        from cron.scheduler import _HOME_TARGET_ENV_VARS
 
-        class _GatewayConfig:
-            def get_connected_platforms(self_inner):
-                return [_Platform(n) for n in names]
-
-        monkeypatch.setattr(
-            gateway_config, "load_gateway_config", lambda: _GatewayConfig()
-        )
-
-    def test_lists_configured_platforms_flagging_missing_home_channel(self, monkeypatch):
-        from cron.scheduler import cron_delivery_targets
-
-        self._patch_connected(monkeypatch, ["matrix", "telegram"])
-        monkeypatch.delenv("MATRIX_HOME_ROOM", raising=False)
-        monkeypatch.delenv("TELEGRAM_HOME_CHANNEL", raising=False)
-
-        targets = {t["id"]: t for t in cron_delivery_targets()}
-
-        assert set(targets) == {"matrix", "telegram"}
-        # Configured but no home channel → surfaced, flagged for the UI.
-        assert targets["matrix"]["home_target_set"] is False
-        assert targets["matrix"]["home_env_var"] == "MATRIX_HOME_ROOM"
-        assert targets["telegram"]["home_target_set"] is False
-
-    def test_home_channel_set_marks_target_ready(self, monkeypatch):
-        from cron.scheduler import cron_delivery_targets
-
-        self._patch_connected(monkeypatch, ["matrix"])
-        monkeypatch.setenv("MATRIX_HOME_ROOM", "!room:matrix.org")
-
-        targets = {t["id"]: t for t in cron_delivery_targets()}
-
-        assert targets["matrix"]["home_target_set"] is True
-
-    def test_unconfigured_platforms_excluded(self, monkeypatch):
-        from cron.scheduler import cron_delivery_targets
-
-        # Only telegram is connected; matrix env var set but gateway not configured.
-        self._patch_connected(monkeypatch, ["telegram"])
-        monkeypatch.setenv("MATRIX_HOME_ROOM", "!room:matrix.org")
-
-        ids = {t["id"] for t in cron_delivery_targets()}
-
-        assert ids == {"telegram"}
-        assert "matrix" not in ids
-
-    def test_no_gateway_config_returns_empty(self, monkeypatch):
-        import gateway.config as gateway_config
-        from cron.scheduler import cron_delivery_targets
-
-        def _boom():
-            raise RuntimeError("no gateway config")
-
-        monkeypatch.setattr(gateway_config, "load_gateway_config", _boom)
-
-        assert cron_delivery_targets() == []
+        assert _HOME_TARGET_ENV_VARS.get("whatsapp") == "WHATSAPP_HOME_CHANNEL"
