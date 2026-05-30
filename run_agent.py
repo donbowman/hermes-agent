@@ -4906,6 +4906,18 @@ class AIAgent:
             logging.error("Failed to activate fallback %s: %s", fb_model, e)
             return self._try_activate_fallback()  # try next in chain
 
+    def _has_pending_fallback(self) -> bool:
+        """Whether a fallback provider is actually available to switch to.
+
+        Used to gate user-facing "trying fallback..." status so we don't
+        announce a fallback that will never be attempted (the user has no
+        fallback chain configured).  Mirrors the early-return guard in
+        ``try_activate_fallback`` (#35314, #17446).
+        """
+        chain = getattr(self, "_fallback_chain", None) or []
+        index = getattr(self, "_fallback_index", 0)
+        return index < len(chain)
+
     # ── Per-turn primary restoration ─────────────────────────────────────
 
     def _restore_primary_runtime(self) -> bool:
