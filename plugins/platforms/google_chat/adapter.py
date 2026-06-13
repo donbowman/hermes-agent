@@ -3158,9 +3158,15 @@ async def _standalone_send(
     a tampered value cannot path-traverse or query-inject.
 
     ``media_files`` and ``force_document`` are accepted for signature
-    parity but are not implemented for the standalone path; messages with
-    attachments send as text-only.  The live adapter handles attachments.
+    parity but are not implemented for the standalone path.  The live
+    adapter handles attachments.
     """
+    if media_files:
+        return {"error": (
+            "Google Chat standalone send: native attachments require "
+            "the live adapter (gateway must be running with Google Chat "
+            "connected). Got media_files but the adapter is not in-process."
+        )}
     if not chat_id:
         return {"error": "Google Chat standalone send: chat_id (space resource) is required"}
     if not _GCHAT_CHAT_ID_RE.match(chat_id):
