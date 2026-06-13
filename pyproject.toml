@@ -224,6 +224,14 @@ google = [
   "google-auth-oauthlib==1.3.1",
   "google-auth-httplib2==0.3.1",
 ]
+google_chat = [
+  # Required by plugins/platforms/google_chat/ (Pub/Sub subscription, Chat
+  # REST API, service-account auth, user-OAuth attachment uploads).  The
+  # adapter lazy-imports the SDK stack; this extra lets users pre-install it.
+  "google-cloud-pubsub==2.32.0",
+  "google-api-python-client==2.194.0",
+  "google-auth-httplib2==0.3.1",
+]
 youtube = [
   # Required by skills/media/youtube-content and
   # optional-skills/productivity/memento-flashcards (youtube_quiz.py).
